@@ -197,7 +197,10 @@ impl Application for OnlyClimb {
                 }
             }
             Message::LaunchGame => {
-                protect::decrypt_and_launch();
+                if let Err(e) = protect::decrypt_and_launch() {
+                    self.status = e;
+                    self.status_ok = false;
+                }
             }
             Message::UpdateChecked(state) => {
                 // A failed *startup* check (e.g. offline) stays silent.

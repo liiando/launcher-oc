@@ -21,14 +21,27 @@ fn exe_dir() -> PathBuf {
         .to_path_buf()
 }
 
+/// Minimum sensible size for an encrypted game binary (4 KiB).
+/// If `system_core.bin` is smaller it was corrupted by a failed write on a
+/// protected directory — most likely an empty file left by `File::create`
+/// when `write_all` was rejected.
+const MIN_BIN_SIZE: u64 = 4096;
+
 pub fn encrypt_if_needed() {
     let dir = exe_dir();
     let exe_path = dir.join(EXE_NAME);
     let bin_path = dir.join(BIN_NAME);
 
-    if bin_path.exists() {
-        return;
+    // A valid .bin must be non-trivial. If a previous launch left a 0-byte
+    // stub (e.g. `CreateFile` succeeded but `WriteFile` was denied), purge
+    // it so we re-encrypt from the real `system_core.exe`.
+    if let Ok(meta) = fs::metadata(&bin_path) {
+        if meta.len() >= MIN_BIN_SIZE {
+            return; // already encrypted successfully
+        }
+        let _ = fs::remove_file(&bin_path);
     }
+
     if !exe_path.exists() {
         return;
     }
@@ -50,15 +63,17 @@ pub fn encrypt_if_needed() {
     }
 }
 
-pub fn decrypt_and_launch() -> bool {
+pub fn decrypt_and_launch() -> Result<(), String> {
     let dir = exe_dir();
     let bin_path = dir.join(BIN_NAME);
     let tmp_path = dir.join(TMP_NAME);
 
-    let data = match fs::read(&bin_path) {
-        Ok(d) if !d.is_empty() => d,
-        _ => return false,
-    };
+    let data = fs::read(&bin_path).map_err(|e| format!("Lecture du jeu impossible : {e}"))?;
+    if data.is_empty() {
+        return Err(String::from(
+            "Fichier jeu vide (installation corrompue). Relancez le launcher.",
+        ));
+    }
 
     let key = get_key();
     let decrypted: Vec<u8> = data
@@ -67,9 +82,8 @@ pub fn decrypt_and_launch() -> bool {
         .map(|(i, b)| b ^ key[i % key.len()])
         .collect();
 
-    if fs::write(&tmp_path, &decrypted).is_err() {
-        return false;
-    }
+    fs::write(&tmp_path, &decrypted)
+        .map_err(|e| format!("Écriture temporaire impossible : {e}"))?;
 
     match std::process::Command::new(&tmp_path)
         .current_dir(&dir)
@@ -81,11 +95,11 @@ pub fn decrypt_and_launch() -> bool {
                 std::thread::sleep(std::time::Duration::from_secs(5));
                 let _ = fs::remove_file(&t);
             });
-            true
+            Ok(())
         }
-        Err(_) => {
+        Err(e) => {
             let _ = fs::remove_file(&tmp_path);
-            false
+            Err(format!("Impossible de lancer le jeu : {e}"))
         }
     }
 }
