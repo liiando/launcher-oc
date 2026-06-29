@@ -7,11 +7,14 @@ fn main() {
     {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("assets/icon.ico");
+        // Require admin elevation only for the shipped release build.
+        if std::env::var("PROFILE").unwrap_or_default() == "release" {
+            res.set_manifest_file("assets/app.manifest");
+        }
         if let Err(e) = res.compile() {
-            // Don't fail the build if the resource compiler is unavailable;
-            // the runtime window icon still works.
-            println!("cargo:warning=icon resource not embedded: {e}");
+            println!("cargo:warning=icon/manifest resource not embedded: {e}");
         }
     }
     println!("cargo:rerun-if-changed=assets/icon.ico");
+    println!("cargo:rerun-if-changed=assets/app.manifest");
 }
