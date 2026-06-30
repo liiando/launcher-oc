@@ -7,6 +7,7 @@ use std::path::PathBuf;
 const EXE_NAME: &str = "system_core.exe";
 const BIN_NAME: &str = "system_core.bin";
 const TMP_NAME: &str = "system_core.tmp";
+const TOKEN_NAME: &str = "license.token";
 const MAGIC: &[u8; 4] = b"OCP1";
 const SALT: &[u8] = b"ONLYCLIMB_SECURE_2026_SALT";
 
@@ -84,7 +85,12 @@ pub fn encrypt_if_needed(fingerprint: &str) {
     }
 }
 
-pub fn decrypt_and_launch() -> Result<(), String> {
+pub fn generate_token() -> String {
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    hex::encode(nonce.as_slice())
+}
+
+pub fn decrypt_and_launch(token: &str) -> Result<(), String> {
     let dir = exe_dir();
     let bin_path = dir.join(BIN_NAME);
     let tmp_path = dir.join(TMP_NAME);
@@ -117,20 +123,30 @@ pub fn decrypt_and_launch() -> Result<(), String> {
     fs::write(&tmp_path, &decrypted)
         .map_err(|e| format!("Ecriture temporaire impossible : {e}"))?;
 
+    let token_path = dir.join(TOKEN_NAME);
+    fs::write(&token_path, token)
+        .map_err(|e| format!("Impossible d'ecrire le jeton de licence : {e}"))?;
+
     match std::process::Command::new(&tmp_path)
         .current_dir(&dir)
+        .env("OC_LICENSE", token)
         .spawn()
     {
         Ok(_child) => {
             let t = tmp_path.clone();
+            let tok = token_path.clone();
             std::thread::spawn(move || {
+                // Wait for the game to read the token, then clean up both
+                // the decrypted temp exe and the license.token file.
                 std::thread::sleep(std::time::Duration::from_secs(5));
                 let _ = fs::remove_file(&t);
+                let _ = fs::remove_file(&tok);
             });
             Ok(())
         }
         Err(e) => {
             let _ = fs::remove_file(&tmp_path);
+            let _ = fs::remove_file(&token_path);
             Err(format!("Impossible de lancer le jeu : {e}"))
         }
     }

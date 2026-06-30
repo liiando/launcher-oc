@@ -66,6 +66,7 @@ pub fn main() -> iced::Result {
 
 struct OnlyClimb {
     fingerprint: String,
+    license_token: String,
     license_key: String,
     tiktok_username: String,
     status: String,
@@ -98,12 +99,14 @@ impl Application for OnlyClimb {
     fn new(_flags: ()) -> (Self, Command<Message>) {
         let fp = fingerprint::generate_fingerprint();
         protect::encrypt_if_needed(&fp);
+        let token = protect::generate_token();
 
         let saved = license::read_license();
 
         (
             Self {
                 fingerprint: fp,
+                license_token: token,
                 license_key: saved
                     .as_ref()
                     .map(|l| l.license_key.clone())
@@ -197,7 +200,7 @@ impl Application for OnlyClimb {
                 }
             }
             Message::LaunchGame => {
-                if let Err(e) = protect::decrypt_and_launch() {
+                if let Err(e) = protect::decrypt_and_launch(&self.license_token) {
                     self.status = e;
                     self.status_ok = false;
                 }
