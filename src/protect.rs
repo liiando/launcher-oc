@@ -1,17 +1,22 @@
+use aes_gcm::aead::{Aead, KeyInit, OsRng};
+use aes_gcm::{AeadCore, Aes256Gcm, Key, Nonce};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
 
-const KEY_SEED: &str = "ONLYCLIMB_SECURE_2026";
 const EXE_NAME: &str = "system_core.exe";
 const BIN_NAME: &str = "system_core.bin";
 const TMP_NAME: &str = "system_core.tmp";
+const MAGIC: &[u8; 4] = b"OCP1";
+const SALT: &[u8] = b"ONLYCLIMB_SECURE_2026_SALT";
 
-fn get_key() -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(KEY_SEED.as_bytes());
-    hasher.finalize().to_vec()
-}
+/// Fingerprint used to encrypt the distributed `system_core.bin`.
+/// Must match the key used during deployment, otherwise AES-GCM auth fails.
+const MASTER_FINGERPRINT: &str = "D3BC655F35674C56";
+
+/// Minimum sensible size for an AES-GCM encrypted game binary.
+/// Magic (4) + nonce (12) + tag (16) + min PE header = at least 8 KiB.
+const MIN_BIN_SIZE: u64 = 8192;
 
 fn exe_dir() -> PathBuf {
     std::env::current_exe()
@@ -21,13 +26,22 @@ fn exe_dir() -> PathBuf {
         .to_path_buf()
 }
 
-/// Minimum sensible size for an encrypted game binary (4 KiB).
-/// If `system_core.bin` is smaller it was corrupted by a failed write on a
-/// protected directory — most likely an empty file left by `File::create`
-/// when `write_all` was rejected.
-const MIN_BIN_SIZE: u64 = 4096;
+fn derive_key(fingerprint: &str) -> [u8; 32] {
+    let fp_hash = {
+        let mut h = Sha256::new();
+        h.update(fingerprint.as_bytes());
+        h.finalize().to_vec()
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(SALT);
+    hasher.update(&fp_hash);
+    let result = hasher.finalize();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&result[..32]);
+    key
+}
 
-pub fn encrypt_if_needed() {
+pub fn encrypt_if_needed(fingerprint: &str) {
     let dir = exe_dir();
     let exe_path = dir.join(EXE_NAME);
     let bin_path = dir.join(BIN_NAME);
@@ -46,19 +60,26 @@ pub fn encrypt_if_needed() {
         return;
     }
 
-    let data = fs::read(&exe_path).unwrap_or_default();
-    if data.is_empty() {
-        return;
-    }
+    let data = match fs::read(&exe_path) {
+        Ok(d) if !d.is_empty() => d,
+        _ => return,
+    };
 
-    let key = get_key();
-    let encrypted: Vec<u8> = data
-        .iter()
-        .enumerate()
-        .map(|(i, b)| b ^ key[i % key.len()])
-        .collect();
+    let key = derive_key(fingerprint);
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
 
-    if fs::write(&bin_path, &encrypted).is_ok() {
+    let ciphertext = match cipher.encrypt(&nonce, data.as_ref()) {
+        Ok(ct) => ct,
+        Err(_) => return,
+    };
+
+    let mut out = Vec::with_capacity(4 + 12 + ciphertext.len());
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ciphertext);
+
+    if fs::write(&bin_path, &out).is_ok() {
         let _ = fs::remove_file(&exe_path);
     }
 }
@@ -68,22 +89,33 @@ pub fn decrypt_and_launch() -> Result<(), String> {
     let bin_path = dir.join(BIN_NAME);
     let tmp_path = dir.join(TMP_NAME);
 
-    let data = fs::read(&bin_path).map_err(|e| format!("Lecture du jeu impossible : {e}"))?;
-    if data.is_empty() {
+    let raw = fs::read(&bin_path).map_err(|e| format!("Lecture du jeu impossible : {e}"))?;
+
+    if raw.len() < 4 + 12 + 16 {
         return Err(String::from(
-            "Fichier jeu vide (installation corrompue). Relancez le launcher.",
+            "Fichier jeu corrompu (trop petit). Relancez le launcher.",
         ));
     }
 
-    let key = get_key();
-    let decrypted: Vec<u8> = data
-        .iter()
-        .enumerate()
-        .map(|(i, b)| b ^ key[i % key.len()])
-        .collect();
+    if &raw[..4] != MAGIC {
+        return Err(String::from(
+            "Fichier jeu invalide (magic OCP1 absent). Reinstallation necessaire.",
+        ));
+    }
+
+    let nonce = Nonce::from_slice(&raw[4..16]);
+    let ciphertext = &raw[16..];
+
+    // Decrypt with the MASTER key that was used to encrypt the distributed .bin
+    let key = derive_key(MASTER_FINGERPRINT);
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+
+    let decrypted = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| String::from("Dechiffrement echoue. Fichier jeu corrompu ou altere."))?;
 
     fs::write(&tmp_path, &decrypted)
-        .map_err(|e| format!("Écriture temporaire impossible : {e}"))?;
+        .map_err(|e| format!("Ecriture temporaire impossible : {e}"))?;
 
     match std::process::Command::new(&tmp_path)
         .current_dir(&dir)

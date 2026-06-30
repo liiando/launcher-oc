@@ -96,8 +96,8 @@ impl Application for OnlyClimb {
     type Flags = ();
 
     fn new(_flags: ()) -> (Self, Command<Message>) {
-        protect::encrypt_if_needed();
         let fp = fingerprint::generate_fingerprint();
+        protect::encrypt_if_needed(&fp);
 
         let saved = license::read_license();
 
