@@ -98,6 +98,7 @@ impl Application for OnlyClimb {
 
     fn new(_flags: ()) -> (Self, Command<Message>) {
         let fp = fingerprint::generate_fingerprint();
+        protect::cleanup_old_temps();
         protect::encrypt_if_needed(&fp);
         let token = protect::generate_token();
 

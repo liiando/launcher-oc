@@ -6,8 +6,9 @@ use std::path::PathBuf;
 
 const EXE_NAME: &str = "system_core.exe";
 const BIN_NAME: &str = "system_core.bin";
-const TMP_NAME: &str = "system_core.tmp";
 const TOKEN_NAME: &str = "license.token";
+const TMP_PREFIX: &str = "system_core_";
+const TMP_SUFFIX: &str = ".tmp";
 const MAGIC: &[u8; 4] = b"OCP1";
 const SALT: &[u8] = b"ONLYCLIMB_SECURE_2026_SALT";
 
@@ -85,6 +86,21 @@ pub fn encrypt_if_needed(fingerprint: &str) {
     }
 }
 
+/// Remove leftover temporary game binaries from previous (possibly crashed)
+/// launches so they don't pile up or cause "file in use" errors.
+pub fn cleanup_old_temps() {
+    let dir = exe_dir();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with(TMP_PREFIX) && name_str.ends_with(TMP_SUFFIX) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
 pub fn generate_token() -> String {
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     hex::encode(nonce.as_slice())
@@ -93,7 +109,13 @@ pub fn generate_token() -> String {
 pub fn decrypt_and_launch(token: &str) -> Result<(), String> {
     let dir = exe_dir();
     let bin_path = dir.join(BIN_NAME);
-    let tmp_path = dir.join(TMP_NAME);
+    let tmp_name = format!(
+        "{}{}{}",
+        TMP_PREFIX,
+        hex::encode(Aes256Gcm::generate_nonce(&mut OsRng).as_slice()),
+        TMP_SUFFIX
+    );
+    let tmp_path = dir.join(&tmp_name);
 
     let raw = fs::read(&bin_path).map_err(|e| format!("Lecture du jeu impossible : {e}"))?;
 
@@ -132,15 +154,17 @@ pub fn decrypt_and_launch(token: &str) -> Result<(), String> {
         .env("OC_LICENSE", token)
         .spawn()
     {
-        Ok(_child) => {
+        Ok(mut child) => {
             let t = tmp_path.clone();
             let tok = token_path.clone();
             std::thread::spawn(move || {
-                // Wait for the game to read the token, then clean up both
-                // the decrypted temp exe and the license.token file.
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                let _ = fs::remove_file(&t);
-                let _ = fs::remove_file(&tok);
+                // Wait for the game to exit before cleaning up the
+                // decrypted temp exe (still in use while running).
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&t);
+                // Token file can be removed earlier, but cleaning
+                // everything at once keeps the logic simple.
+                let _ = std::fs::remove_file(&tok);
             });
             Ok(())
         }
